@@ -2,6 +2,7 @@
 """go2web - HTTP client over raw TCP sockets"""
 
 import sys
+import json
 import argparse
 
 from src.http_client import HTTPClient
@@ -40,7 +41,10 @@ def main():
     if args.u:
         response = client.request(args.u)
         if "json" in response.content_type:
-            print(response.body)
+            try:
+                print(json.dumps(json.loads(response.body), indent=2, ensure_ascii=False))
+            except json.JSONDecodeError:
+                print(response.body)
         else:
             print(extract_text(response.body))
     elif args.s:
