@@ -6,6 +6,7 @@ import argparse
 
 from src.http_client import HTTPClient
 from src.html_parser import extract_text
+from src.search import search, print_results
 
 
 def build_parser():
@@ -43,7 +44,8 @@ def main():
             print(extract_text(response.body))
     elif args.s:
         query = " ".join(args.s)
-        print(f"[stub] Would search: {query}")
+        results = search(query, client)
+        print_results(results)
 
 
 if __name__ == "__main__":
