@@ -5,6 +5,7 @@ import sys
 import argparse
 
 from src.http_client import HTTPClient
+from src.html_parser import extract_text
 
 
 def build_parser():
@@ -36,7 +37,10 @@ def main():
 
     if args.u:
         response = client.request(args.u)
-        print(response.body)
+        if "json" in response.content_type:
+            print(response.body)
+        else:
+            print(extract_text(response.body))
     elif args.s:
         query = " ".join(args.s)
         print(f"[stub] Would search: {query}")
