@@ -2,8 +2,23 @@
 
 import socket
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlparse
+
+import os
+
+# Prefer system cert bundle, fall back to certifi
+if os.path.exists("/etc/ssl/cert.pem"):
+    _SSL_CAFILE = "/etc/ssl/cert.pem"
+else:
+    try:
+        import certifi
+        _SSL_CAFILE = certifi.where()
+    except ImportError:
+        _SSL_CAFILE = None
+
+
+REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 
 @dataclass
@@ -31,15 +46,54 @@ def _parse_url(url: str):
     return scheme, host, port, path
 
 
+def _resolve_redirect(base_url: str, location: str) -> str:
+    """Resolve a redirect Location relative to the base URL."""
+    if location.startswith("http://") or location.startswith("https://"):
+        return location
+    parsed = urlparse(base_url)
+    if location.startswith("/"):
+        return f"{parsed.scheme}://{parsed.netloc}{location}"
+    # relative path — resolve against current directory
+    base_path = parsed.path.rsplit("/", 1)[0] + "/"
+    return f"{parsed.scheme}://{parsed.netloc}{base_path}{location}"
+
+
 def _read_all(sock) -> bytes:
     """Read all bytes from socket until EOF."""
     buf = b""
     while True:
-        chunk = sock.recv(4096)
+        try:
+            chunk = sock.recv(4096)
+        except (OSError, ssl.SSLError):
+            break
         if not chunk:
             break
         buf += chunk
     return buf
+
+
+def _decode_chunked(data: bytes) -> bytes:
+    """Decode HTTP chunked transfer encoding."""
+    result = b""
+    pos = 0
+    while pos < len(data):
+        # Find end of chunk size line
+        end = data.find(b"\r\n", pos)
+        if end == -1:
+            break
+        size_line = data[pos:end].decode("latin-1").split(";")[0].strip()
+        if not size_line:
+            break
+        try:
+            size = int(size_line, 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        pos = end + 2  # skip \r\n after size
+        result += data[pos:pos + size]
+        pos += size + 2  # skip \r\n after chunk data
+    return result
 
 
 def _parse_headers(header_bytes: bytes) -> dict:
@@ -72,62 +126,82 @@ def _decode_charset(content_type: str, body: bytes) -> str:
     return body.decode(charset, errors="replace")
 
 
+def _do_request(url: str, extra_headers: dict = None) -> HTTPResponse:
+    """Single HTTP request without redirect following."""
+    scheme, host, port, path = _parse_url(url)
+
+    headers_lines = [
+        f"GET {path} HTTP/1.1",
+        f"Host: {host}",
+        "User-Agent: go2web/1.0",
+        "Accept: application/json,text/html;q=0.9,*/*;q=0.8",
+        "Accept-Encoding: identity",
+        "Connection: close",
+    ]
+    if extra_headers:
+        for k, v in extra_headers.items():
+            headers_lines.append(f"{k}: {v}")
+    request_str = "\r\n".join(headers_lines) + "\r\n\r\n"
+
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_sock.settimeout(15)
+    try:
+        raw_sock.connect((host, port))
+        if scheme == "https":
+            context = ssl.create_default_context(cafile=_SSL_CAFILE)
+            sock = context.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+
+        sock.sendall(request_str.encode("latin-1"))
+        raw = _read_all(sock)
+    finally:
+        raw_sock.close()
+
+    if b"\r\n\r\n" in raw:
+        header_part, body_bytes = raw.split(b"\r\n\r\n", 1)
+    else:
+        header_part = raw
+        body_bytes = b""
+
+    status_code, reason = _parse_status_line(header_part)
+    headers = _parse_headers(header_part)
+
+    # Decode chunked if needed
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        body_bytes = _decode_chunked(body_bytes)
+
+    content_type = headers.get("content-type", "")
+    body = _decode_charset(content_type, body_bytes)
+
+    return HTTPResponse(
+        status_code=status_code,
+        reason=reason,
+        headers=headers,
+        body=body,
+        raw_body=body_bytes,
+        content_type=content_type,
+        url=url,
+    )
+
+
 class HTTPClient:
     def __init__(self, cache=None):
         self.cache = cache
 
-    def request(self, url: str, extra_headers: dict = None) -> HTTPResponse:
-        """Make a GET request, returning an HTTPResponse."""
-        scheme, host, port, path = _parse_url(url)
-
-        # Build raw request
-        headers_lines = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}",
-            "User-Agent: go2web/1.0",
-            "Accept: text/html,application/json;q=0.9,*/*;q=0.8",
-            "Accept-Encoding: identity",
-            "Connection: close",
-        ]
-        if extra_headers:
-            for k, v in extra_headers.items():
-                headers_lines.append(f"{k}: {v}")
-        request_str = "\r\n".join(headers_lines) + "\r\n\r\n"
-
-        # Connect
-        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        raw_sock.settimeout(15)
-        try:
-            raw_sock.connect((host, port))
-            if scheme == "https":
-                context = ssl.create_default_context()
-                sock = context.wrap_socket(raw_sock, server_hostname=host)
+    def request(self, url: str, extra_headers: dict = None, max_redirects: int = 10) -> HTTPResponse:
+        """Make a GET request, following redirects."""
+        for _ in range(max_redirects + 1):
+            response = _do_request(url, extra_headers)
+            if response.status_code in REDIRECT_CODES:
+                location = response.headers.get("location", "")
+                if not location:
+                    break
+                url = _resolve_redirect(url, location)
+                response.url = url
+                # For 303, always GET; for others same method (we always GET)
             else:
-                sock = raw_sock
-
-            sock.sendall(request_str.encode("latin-1"))
-            raw = _read_all(sock)
-        finally:
-            raw_sock.close()
-
-        # Split headers / body
-        if b"\r\n\r\n" in raw:
-            header_part, body_bytes = raw.split(b"\r\n\r\n", 1)
+                break
         else:
-            header_part = raw
-            body_bytes = b""
-
-        status_code, reason = _parse_status_line(header_part)
-        headers = _parse_headers(header_part)
-        content_type = headers.get("content-type", "")
-        body = _decode_charset(content_type, body_bytes)
-
-        return HTTPResponse(
-            status_code=status_code,
-            reason=reason,
-            headers=headers,
-            body=body,
-            raw_body=body_bytes,
-            content_type=content_type,
-            url=url,
-        )
+            raise RuntimeError(f"Too many redirects (>{max_redirects})")
+        return response
