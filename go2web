@@ -4,6 +4,8 @@
 import sys
 import argparse
 
+from src.http_client import HTTPClient
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -26,12 +28,15 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.h:
+    if getattr(args, 'h', False) or getattr(args, 'help', False):
         parser.print_help()
         sys.exit(0)
 
+    client = HTTPClient()
+
     if args.u:
-        print(f"[stub] Would fetch: {args.u}")
+        response = client.request(args.u)
+        print(response.body)
     elif args.s:
         query = " ".join(args.s)
         print(f"[stub] Would search: {query}")
