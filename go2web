@@ -6,7 +6,7 @@ import argparse
 
 from src.http_client import HTTPClient
 from src.html_parser import extract_text
-from src.search import search, print_results
+from src.search import search, print_results, interactive_select
 
 
 def build_parser():
@@ -46,6 +46,7 @@ def main():
         query = " ".join(args.s)
         results = search(query, client)
         print_results(results)
+        interactive_select(results, client)
 
 
 if __name__ == "__main__":

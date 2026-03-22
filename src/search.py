@@ -116,3 +116,28 @@ def print_results(results: list) -> None:
         if r.snippet:
             print(f"   {r.snippet}")
         print()
+
+
+def interactive_select(results: list, client) -> None:
+    """Prompt user to open a search result by number."""
+    if not results:
+        return
+    try:
+        choice = input("Open result number (or press Enter to quit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if not choice.isdigit():
+        return
+    idx = int(choice) - 1
+    if not (0 <= idx < len(results)):
+        print("Invalid selection.")
+        return
+    url = results[idx].url
+    print(f"\nFetching {url} ...\n")
+    from src.html_parser import extract_text
+    response = client.request(url)
+    if "json" in response.content_type:
+        print(response.body)
+    else:
+        print(extract_text(response.body))
