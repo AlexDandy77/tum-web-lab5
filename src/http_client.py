@@ -204,15 +204,30 @@ class HTTPClient:
     def request(self, url: str, extra_headers: dict = None, max_redirects: int = 10) -> HTTPResponse:
         """Make a GET request, following redirects, using cache when available."""
         final_url = url
+        stale_entry = None
 
-        # Check cache before making any network request
         if self.cache:
             entry = self.cache.get(url)
-            if entry and self.cache.is_fresh(entry):
-                return self._response_from_cache(entry, url)
+            if entry:
+                if self.cache.is_fresh(entry):
+                    return self._response_from_cache(entry, url)
+                # Stale — keep for conditional request
+                stale_entry = entry
+
+        # Build conditional headers for stale revalidation
+        cond_headers = dict(extra_headers or {})
+        if stale_entry:
+            if stale_entry.etag:
+                cond_headers["If-None-Match"] = stale_entry.etag
+            elif stale_entry.last_modified:
+                cond_headers["If-Modified-Since"] = stale_entry.last_modified
 
         for _ in range(max_redirects + 1):
-            response = _do_request(final_url, extra_headers)
+            response = _do_request(final_url, cond_headers or None)
+            if response.status_code == 304 and stale_entry:
+                # Not modified — refresh TTL and return cached body
+                self.cache.refresh_ttl(url)
+                return self._response_from_cache(stale_entry, url)
             if response.status_code in REDIRECT_CODES:
                 location = response.headers.get("location", "")
                 if not location:
