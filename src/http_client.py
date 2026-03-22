@@ -189,19 +189,50 @@ class HTTPClient:
     def __init__(self, cache=None):
         self.cache = cache
 
+    def _response_from_cache(self, entry, url: str) -> HTTPResponse:
+        content_type = entry.headers.get("content-type", "")
+        return HTTPResponse(
+            status_code=entry.status_code,
+            reason="OK (cached)",
+            headers=entry.headers,
+            body=entry.body,
+            raw_body=entry.body.encode("utf-8", errors="replace"),
+            content_type=content_type,
+            url=url,
+        )
+
     def request(self, url: str, extra_headers: dict = None, max_redirects: int = 10) -> HTTPResponse:
-        """Make a GET request, following redirects."""
+        """Make a GET request, following redirects, using cache when available."""
+        final_url = url
+
+        # Check cache before making any network request
+        if self.cache:
+            entry = self.cache.get(url)
+            if entry and self.cache.is_fresh(entry):
+                return self._response_from_cache(entry, url)
+
         for _ in range(max_redirects + 1):
-            response = _do_request(url, extra_headers)
+            response = _do_request(final_url, extra_headers)
             if response.status_code in REDIRECT_CODES:
                 location = response.headers.get("location", "")
                 if not location:
                     break
-                url = _resolve_redirect(url, location)
-                response.url = url
-                # For 303, always GET; for others same method (we always GET)
+                final_url = _resolve_redirect(final_url, location)
+                response.url = final_url
             else:
                 break
         else:
             raise RuntimeError(f"Too many redirects (>{max_redirects})")
+
+        # Store in cache
+        if self.cache and response.status_code == 200:
+            self.cache.store(
+                url=url,
+                status_code=response.status_code,
+                headers=response.headers,
+                body=response.body,
+                etag=response.headers.get("etag", ""),
+                last_modified=response.headers.get("last-modified", ""),
+            )
+
         return response

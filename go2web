@@ -7,6 +7,7 @@ import argparse
 from src.http_client import HTTPClient
 from src.html_parser import extract_text
 from src.search import search, print_results, interactive_select
+from src.cache import Cache
 
 
 def build_parser():
@@ -34,7 +35,7 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    client = HTTPClient()
+    client = HTTPClient(cache=Cache())
 
     if args.u:
         response = client.request(args.u)
